@@ -1,0 +1,24 @@
+Circuit: * C:\Users\User\Documents\Projects\HeaterControl\Simulation\HeaterControl.asc
+
+Direct Newton iteration for .op point succeeded.
+.step x=0.02
+.step x=0.05
+.step x=0.1
+
+Date: Fri Jan 25 00:14:24 2019
+Total elapsed time: 2.012 seconds.
+
+tnom = 27
+temp = 27
+method = modified trap
+totiter = 177037
+traniter = 177025
+tranpoints = 83348
+accept = 50650
+rejected = 32698
+matrix size = 19
+fillins = 0
+solver = Normal
+Matrix Compiler1: 544 bytes object code size  0.3/0.2/[0.1]
+Matrix Compiler2: 1.07 KB object code size  0.1/0.2/[0.1]
+

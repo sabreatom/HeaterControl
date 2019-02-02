@@ -44,16 +44,60 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include <stdlib.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+//Panel button possible states:
+typedef enum {
+  UNPRESSED = 0,
+  PRESSED
+} panel_button_state_t;
 
+//Heater load states:
+typedef enum {
+  LOAD_TOO_SMALL = 0,
+  LOAD_OK
+} heater_load_state_t;
+/* USER CODE END PTD */
+
+//Load switch states:
+typedef enum {
+  LOAD_OFF = 0,
+  LOAD_ON
+} load_switch_state_t;
+
+//error flag states:
+typedef enum {
+  NO_ERROR = 0,
+  ERROR_PRESENT
+}error_flag_state_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define PANEL_BUTTON_DEBOUNCE_DELAY_MS          50
 
+#define PANEL_LED_BLINK_INTERVAL_MS             1000 //1 sec
+
+#define PANEL_ERROR_LED_BLINK_INTERVAL_MS       200 //1 sec
+
+#define ADC_SAMPLE_NUMBER                       20
+
+#define ADC_SAMPLE_PERIOD_MS                    3
+
+#define ADC_CONV_TIMEOUT_MS                     1000 //1 sec
+
+#define ADC_REF_VOLT_MV                         3300 //3.3V
+
+//TODO this value should be calibrated when no load:
+#define ADC_ZERO_CURR_VOLT_MV                   1652 //1.652V
+
+#define CURR_SENS_SENSITIVITY_MV                185 //185 mV/A
+
+#define LOAD_CURR_THRESHOLD_MA                  150 //mA
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,6 +110,8 @@ ADC_HandleTypeDef hadc;
 
 /* USER CODE BEGIN PV */
 
+static error_flag_state_t _error_flag = NO_ERROR;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,7 +119,11 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC_Init(void);
 /* USER CODE BEGIN PFP */
-
+static panel_button_state_t getPanelButtonState(void);
+static void setLoadSwitchState(load_switch_state_t load_switch_state);
+static load_switch_state_t getLoadSwitchState(void);
+static int32_t convToCurrent(int32_t adc_value);
+static heater_load_state_t check_load(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -88,7 +138,11 @@ static void MX_ADC_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  panel_button_state_t _panel_but_current_state = UNPRESSED;
+  
+  heater_load_state_t _heater_load_state = LOAD_OK;
+  
+  uint32_t _led_state_change_time = 0;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -121,6 +175,46 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    _panel_but_current_state = getPanelButtonState();
+    
+    if (_panel_but_current_state == PRESSED){
+      if (getLoadSwitchState() == LOAD_OFF){ //switch load on if not yet switched
+        setLoadSwitchState(LOAD_ON);
+      }
+      
+      //check load:
+      _heater_load_state = check_load();
+      
+    }
+    else{
+      if (getLoadSwitchState() == LOAD_ON){ //switch load off if not yet switched
+        setLoadSwitchState(LOAD_OFF);
+      }
+    }
+    
+    //panel LED logic:
+    if (_error_flag == ERROR_PRESENT){
+      if ((HAL_GetTick() - _led_state_change_time) > PANEL_ERROR_LED_BLINK_INTERVAL_MS){
+        _led_state_change_time = HAL_GetTick();
+        HAL_GPIO_TogglePin(PANEL_LED_GPIO_Port, PANEL_LED_Pin);
+      }
+    }
+    else{
+      if (_panel_but_current_state == PRESSED) {
+        if (_heater_load_state == LOAD_OK){ //load ok, led on
+          HAL_GPIO_WritePin(PANEL_LED_GPIO_Port, PANEL_LED_Pin, GPIO_PIN_SET);
+        }
+        else{ //led not ok, led blinking
+          if ((HAL_GetTick() - _led_state_change_time) > PANEL_LED_BLINK_INTERVAL_MS){
+            _led_state_change_time = HAL_GetTick();
+            HAL_GPIO_TogglePin(PANEL_LED_GPIO_Port, PANEL_LED_Pin);
+          }
+        }
+      }
+      else {
+        HAL_GPIO_WritePin(PANEL_LED_GPIO_Port, PANEL_LED_Pin, GPIO_PIN_RESET);
+      }
+    }
   }
   /* USER CODE END 3 */
 }
@@ -255,6 +349,112 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+//get current panel button state:
+static panel_button_state_t getPanelButtonState(void)
+{
+  GPIO_PinState _but_state_0 = HAL_GPIO_ReadPin(PANEL_BUT_GPIO_Port, PANEL_BUT_Pin);
+  
+  //to overcome some instabilities of button state:
+  uint32_t _sample_uptime = HAL_GetTick();
+  while ((HAL_GetTick() - _sample_uptime) < PANEL_BUTTON_DEBOUNCE_DELAY_MS)
+    ;
+  
+  //if states not equal resample again:
+  if (_but_state_0 != HAL_GPIO_ReadPin(PANEL_BUT_GPIO_Port, PANEL_BUT_Pin)){
+    _sample_uptime = HAL_GetTick();
+    while ((HAL_GetTick() - _sample_uptime) < PANEL_BUTTON_DEBOUNCE_DELAY_MS)
+      ;
+    
+    _but_state_0 = HAL_GPIO_ReadPin(PANEL_BUT_GPIO_Port, PANEL_BUT_Pin);
+  }
+  
+  //convert to actual button state:
+  if (_but_state_0 == GPIO_PIN_RESET){
+    return PRESSED;
+  }
+  else{
+    return UNPRESSED;
+  }
+}
+
+//load switching relay control:
+static void setLoadSwitchState(load_switch_state_t load_switch_state)
+{
+  if (load_switch_state == LOAD_ON){
+    HAL_GPIO_WritePin(RELAY_CNTRL_GPIO_Port, RELAY_CNTRL_Pin, GPIO_PIN_SET);
+  }
+  else{
+    HAL_GPIO_WritePin(RELAY_CNTRL_GPIO_Port, RELAY_CNTRL_Pin, GPIO_PIN_RESET);
+  }
+}
+
+//get current load switch state:
+static load_switch_state_t getLoadSwitchState(void)
+{
+  if (HAL_GPIO_ReadPin(RELAY_CNTRL_GPIO_Port, RELAY_CNTRL_Pin) == GPIO_PIN_SET){
+    return LOAD_ON;
+  }
+  else{
+    return LOAD_OFF;
+  }
+}
+
+//convert ACS712 ADC value to mA:
+static int32_t convToCurrent(int32_t adc_value)
+{
+  //convert to uV:
+  int32_t _tmp = ADC_REF_VOLT_MV * 1000 / 4095 * adc_value;
+  
+  //converte to voltage amplitude, uV:
+  _tmp = abs(_tmp - ADC_ZERO_CURR_VOLT_MV * 1000);
+  
+  //return current value in mA:
+  return _tmp / CURR_SENS_SENSITIVITY_MV;
+}
+
+//check load by measuring current:
+static heater_load_state_t check_load(void)
+{
+  int32_t _data[ADC_SAMPLE_NUMBER] = {0};
+  uint32_t _time_last_sample = 0;
+  int32_t _avrg_curr = 0;
+  
+  for (uint32_t i = 0; i < ADC_SAMPLE_NUMBER; i++) {
+    _time_last_sample = HAL_GetTick();
+    
+    //start ADC conversation to check load current consumption:
+    HAL_ADC_Start(&hadc);
+    
+    //wait for ADC conversation to finish:
+    if (HAL_ADC_PollForConversion(&hadc, ADC_CONV_TIMEOUT_MS) == HAL_OK){
+      _data[i] = HAL_ADC_GetValue(&hadc);
+      
+      _data[i] = convToCurrent(_data[i]);//convert to current mA
+    }
+    else{ //rise an error flag
+      _error_flag = ERROR_PRESENT;
+      return LOAD_TOO_SMALL;
+    }
+    
+    //delay between samples:
+    while ((HAL_GetTick() - _time_last_sample) < ADC_SAMPLE_PERIOD_MS)
+      ;
+  }
+  
+  //calculate average current:
+  for (uint32_t i = 0; i < ADC_SAMPLE_NUMBER; i++){
+    _avrg_curr = _data[i];
+  }
+  _avrg_curr = _avrg_curr / ADC_SAMPLE_NUMBER;
+  
+  if (_avrg_curr > LOAD_CURR_THRESHOLD_MA){ //over threshold
+    return LOAD_OK;
+  }
+  else{
+    return LOAD_TOO_SMALL;
+  }
+}
 
 /* USER CODE END 4 */
 
